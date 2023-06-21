@@ -120,6 +120,11 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 			if err != nil {
 				return nil, err
 			}
+			if configExt != ".starlark" {
+				buf.WriteString("\n")
+				buf.WriteString("---")
+				buf.WriteString("\n")
+			}
 			writeBytes, err := buf.WriteString(res)
 			if err != nil {
 				return nil, err
