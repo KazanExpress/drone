@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !oss
 // +build !oss
 
 package converter
@@ -21,14 +22,16 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"path/filepath"
 	"regexp"
 	templating "text/template"
 
+	"github.com/drone/funcmap"
+
 	"github.com/drone/drone/core"
 	"github.com/drone/drone/plugin/converter/jsonnet"
 	"github.com/drone/drone/plugin/converter/starlark"
-	"github.com/drone/funcmap"
 
 	"gopkg.in/yaml.v2"
 )
@@ -44,15 +47,15 @@ var (
 func Template(templateStore core.TemplateStore, stepLimit uint64, sizeLimit uint64) core.ConvertService {
 	return &templatePlugin{
 		templateStore: templateStore,
-		stepLimit: stepLimit,
-		sizeLimit: sizeLimit,
+		stepLimit:     stepLimit,
+		sizeLimit:     sizeLimit,
 	}
 }
 
 type templatePlugin struct {
 	templateStore core.TemplateStore
-	stepLimit uint64
-	sizeLimit uint64
+	stepLimit     uint64
+	sizeLimit     uint64
 }
 
 func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*core.Config, error) {
@@ -68,20 +71,71 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 		return nil, nil
 	}
 	// map to templateArgs
-	var templateArgs core.TemplateArgs
-	err := yaml.Unmarshal([]byte(req.Config.Data), &templateArgs)
-	if err != nil {
-		return nil, errTemplateSyntaxErrors
-	}
-	// get template from db
-	template, err := p.templateStore.FindName(ctx, templateArgs.Load, req.Repo.Namespace)
-	if err == sql.ErrNoRows {
-		return nil, errTemplateNotFound
-	}
-	if err != nil {
-		return nil, err
+
+	buf := new(bytes.Buffer)
+	offset := 0
+	for {
+		templateReader := bytes.NewBuffer([]byte(req.Config.Data)[offset:])
+		decoder := yaml.NewDecoder(templateReader)
+		var tmp map[string]interface{}
+		if err := decoder.Decode(&tmp); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, errTemplateSyntaxErrors
+		}
+		buf.WriteString("\n")
+
+		kind, ok := tmp["kind"]
+		if !ok {
+			return nil, errTemplateSyntaxErrors
+		}
+
+		switch kind {
+		case "template":
+			templateArgs := core.TemplateArgs{
+				Kind: "template",
+				Load: tmp["load"].(string),
+			}
+			data := make(map[string]interface{})
+			for k, v := range tmp["data"].(map[interface{}]interface{}) {
+				data[k.(string)] = v
+			}
+			templateArgs.Data = data
+			// get template from db
+			template, err := p.templateStore.FindName(ctx, templateArgs.Load, req.Repo.Namespace)
+			if err == sql.ErrNoRows {
+				return nil, errTemplateNotFound
+			}
+			if err != nil {
+				return nil, err
+			}
+
+			// parse template
+			res, err := p.parseTemplate(req, template, templateArgs)
+			if err != nil {
+				return nil, err
+			}
+			writeBytes, err := buf.WriteString(res)
+			if err != nil {
+				return nil, err
+			}
+			offset += writeBytes
+		case "pipeline":
+			writeBytes, err := buf.Write([]byte(req.Config.Data)[offset:])
+			if err != nil {
+				return nil, err
+			}
+			offset += writeBytes
+		default:
+			return nil, errTemplateSyntaxErrors
+		}
 	}
 
+	return &core.Config{Data: buf.String()}, nil
+}
+
+func (p *templatePlugin) parseTemplate(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs) (string, error) {
 	switch filepath.Ext(templateArgs.Load) {
 	case ".yml", ".yaml":
 		return parseYaml(req, template, templateArgs)
@@ -90,11 +144,11 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 	case ".jsonnet":
 		return parseJsonnet(req, template, templateArgs)
 	default:
-		return nil, errTemplateExtensionInvalid
+		return "", errTemplateExtensionInvalid
 	}
 }
 
-func parseYaml(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs) (*core.Config, error) {
+func parseYaml(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs) (string, error) {
 	data := map[string]interface{}{
 		"build": toBuild(req.Build),
 		"repo":  toRepo(req.Repo),
@@ -102,34 +156,28 @@ func parseYaml(req *core.ConvertArgs, template *core.Template, templateArgs core
 	}
 	tmpl, err := templating.New(template.Name).Funcs(funcmap.SafeFuncs).Parse(template.Data)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var out bytes.Buffer
 	err = tmpl.Execute(&out, data)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &core.Config{
-		Data: out.String(),
-	}, nil
+	return out.String(), nil
 }
 
-func parseJsonnet(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs) (*core.Config, error) {
+func parseJsonnet(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs) (string, error) {
 	file, err := jsonnet.Parse(req, nil, 0, template, templateArgs.Data)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &core.Config{
-		Data: file,
-	}, nil
+	return file, nil
 }
 
-func parseStarlark(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs, stepLimit uint64, sizeLimit uint64) (*core.Config, error) {
+func parseStarlark(req *core.ConvertArgs, template *core.Template, templateArgs core.TemplateArgs, stepLimit uint64, sizeLimit uint64) (string, error) {
 	file, err := starlark.Parse(req, template, templateArgs.Data, stepLimit, sizeLimit)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &core.Config{
-		Data: file,
-	}, nil
+	return file, nil
 }
