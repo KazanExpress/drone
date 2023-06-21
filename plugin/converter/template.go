@@ -75,16 +75,20 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 	buf := new(bytes.Buffer)
 	offset := 0
 	for {
-		templateReader := bytes.NewBuffer([]byte(req.Config.Data)[offset:])
+		dataBytes := []byte(req.Config.Data)
+		if offset >= len(dataBytes) {
+			break
+		}
+		templateReader := bytes.NewBuffer(dataBytes[offset:])
 		decoder := yaml.NewDecoder(templateReader)
 		var tmp map[string]interface{}
 		if err := decoder.Decode(&tmp); err != nil {
-			if err == io.EOF {
+			var e *yaml.TypeError
+			if errors.Is(err, io.EOF) || errors.As(err, &e) {
 				break
 			}
 			return nil, errTemplateSyntaxErrors
 		}
-		buf.WriteString("\n")
 
 		kind, ok := tmp["kind"]
 		if !ok {
@@ -122,7 +126,10 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 			}
 			offset += writeBytes
 		case "pipeline":
-			writeBytes, err := buf.Write([]byte(req.Config.Data)[offset:])
+			if configExt != ".starlark" {
+				buf.WriteString("\n")
+			}
+			writeBytes, err := buf.Write(dataBytes[offset:])
 			if err != nil {
 				return nil, err
 			}
