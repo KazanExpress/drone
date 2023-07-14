@@ -22,9 +22,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"io"
 	"path/filepath"
 	"regexp"
+	"strings"
 	templating "text/template"
 
 	"github.com/drone/funcmap"
@@ -70,42 +70,19 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 	if templateFileRE.MatchString(req.Config.Data) == false {
 		return nil, nil
 	}
-	// map to templateArgs
 
 	buf := new(bytes.Buffer)
-	offset := 0
-	for {
-		dataBytes := []byte(req.Config.Data)
-		if offset >= len(dataBytes) {
-			break
-		}
-		templateReader := bytes.NewBuffer(dataBytes[offset:])
-		decoder := yaml.NewDecoder(templateReader)
-		var tmp map[string]interface{}
-		if err := decoder.Decode(&tmp); err != nil {
-			var e *yaml.TypeError
-			if errors.Is(err, io.EOF) || errors.As(err, &e) {
-				break
-			}
+	rawTemplates := strings.Split(req.Config.Data, "---")
+	for _, rawTemplate := range rawTemplates {
+		// map to templateArgs
+		var templateArgs core.TemplateArgs
+		err := yaml.Unmarshal([]byte(rawTemplate), &templateArgs)
+		if err != nil {
 			return nil, errTemplateSyntaxErrors
 		}
-
-		kind, ok := tmp["kind"]
-		if !ok {
-			return nil, errTemplateSyntaxErrors
-		}
-
-		switch kind {
+		var res string
+		switch templateArgs.Kind {
 		case "template":
-			templateArgs := core.TemplateArgs{
-				Kind: "template",
-				Load: tmp["load"].(string),
-			}
-			data := make(map[string]interface{})
-			for k, v := range tmp["data"].(map[interface{}]interface{}) {
-				data[k.(string)] = v
-			}
-			templateArgs.Data = data
 			// get template from db
 			template, err := p.templateStore.FindName(ctx, templateArgs.Load, req.Repo.Namespace)
 			if err == sql.ErrNoRows {
@@ -115,32 +92,24 @@ func (p *templatePlugin) Convert(ctx context.Context, req *core.ConvertArgs) (*c
 				return nil, err
 			}
 
-			// parse template
-			res, err := p.parseTemplate(req, template, templateArgs)
+			res, err = p.parseTemplate(req, template, templateArgs)
 			if err != nil {
 				return nil, err
 			}
-			if configExt != ".starlark" {
-				buf.WriteString("\n")
-				buf.WriteString("---")
-				buf.WriteString("\n")
-			}
-			writeBytes, err := buf.WriteString(res)
-			if err != nil {
-				return nil, err
-			}
-			offset += writeBytes
 		case "pipeline":
-			if configExt != ".starlark" {
-				buf.WriteString("\n")
-			}
-			writeBytes, err := buf.Write(dataBytes[offset:])
-			if err != nil {
-				return nil, err
-			}
-			offset += writeBytes
-		default:
-			return nil, errTemplateSyntaxErrors
+			res = rawTemplate
+		}
+
+		_, err = buf.WriteString(res)
+		if err != nil {
+			return nil, err
+		}
+
+		ext := filepath.Ext(templateArgs.Load)
+		if ext == ".yml" || ext == ".yaml" {
+			buf.WriteString("\n")
+			buf.WriteString("---")
+			buf.WriteString("\n")
 		}
 	}
 

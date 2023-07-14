@@ -7,6 +7,7 @@ steps:
     commands:
       - my_command
 ---
+
 kind: pipeline
 type: docker
 name: extra-pipeline

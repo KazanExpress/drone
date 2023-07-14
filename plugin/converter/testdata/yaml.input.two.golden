@@ -1,5 +1,3 @@
-
----
 kind: pipeline
 type: docker
 name: with_template_1
@@ -17,3 +15,4 @@ steps:
     image: my_image
     commands:
       - my_command
+---
